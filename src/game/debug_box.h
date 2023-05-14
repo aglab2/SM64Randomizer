@@ -10,6 +10,8 @@
 
 #include "types.h"
 
+#include "hacktice/cfg.h"
+
 /**
  * The max amount of debug boxes before debug_box() just returns.
  * You can set this to something higher, but you might run out of space in the gfx pool.
@@ -28,8 +30,9 @@ enum DebugBoxFlags {
     DEBUG_BOX_CLEAR      = (1 << 4), // 0x10
 };
 
-extern u8 hitboxView;
-extern u8 surfaceView;
+#define hitboxView Hacktice_gConfig.showCollision
+#define surfaceView Hacktice_gConfig.showCollision
+
 extern void debug_box_input(void);
 
 void debug_box_color(u32 color);

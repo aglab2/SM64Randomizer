@@ -377,7 +377,7 @@ void geo_process_master_list_sub(struct GraphNodeMasterList *node) {
     switch_ucode(GRAPH_NODE_UCODE_DEFAULT);
 #endif
 #ifdef VISUAL_DEBUG
-    if ( hitboxView) visualise_all_avoidance_points();
+    // if ( hitboxView) visualise_all_avoidance_points();
     if ( hitboxView) render_debug_boxes(DEBUG_UCODE_DEFAULT | DEBUG_BOX_CLEAR);
     // if (surfaceView) visual_surface_loop();
 #endif
@@ -1124,7 +1124,7 @@ void geo_process_object(struct Object *node) {
 
             if (node->header.gfx.sharedChild != NULL) {
 #ifdef VISUAL_DEBUG
-                // if (hitboxView) visualise_object_hitbox(node);
+                if (hitboxView) visualise_object_hitbox(node);
 #endif
                 gCurGraphNodeObject = (struct GraphNodeObject *) node;
                 node->header.gfx.sharedChild->parent = &node->header.gfx.node;

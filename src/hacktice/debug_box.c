@@ -1,3 +1,4 @@
+#ifdef BINARY
 #include <ultra64.h>
 
 /**
@@ -17,22 +18,114 @@
  * If you want to draw a box by specifying min and max points, use debug_box_pos() instead.
  */
 
-#include "sm64.h"
-#include "game/game_init.h"
-#include "game/geo_misc.h"
-#include "engine/math_util.h"
-#include "engine/colors.h"
-#include "area.h"
-#include "level_update.h"
-#include "print.h"
-#include "engine/surface_collision.h"
-#include "engine/surface_load.h"
-#include "object_list_processor.h"
-#include "behavior_data.h"
-
 #include "debug_box.h"
 
-#ifdef VISUAL_DEBUG
+#include "sm64.h"
+#include "behavior_data.h"
+#include "cfg.h"
+#include "colors.h"
+#include "game/area.h"
+#include "game/display.h"
+#include "game/game.h"
+#include "game/geo_misc.h"
+#include "game/level_update.h"
+#include "game/object_list_processor.h"
+#include "game/print.h"
+#include "engine/graph_node.h"
+#include "engine/math_util.h"
+#include "engine/surface_collision.h"
+#include "engine/surface_load.h"
+
+#define DEBUG_POOL_SIZE (0x80570000 - 0x80560000)
+#define ALIGN8(val) (((val) + 0x7) & ~0x7)
+
+struct DebugPool
+{
+    char pool[DEBUG_POOL_SIZE];
+};
+
+#define gDebugPools ((struct DebugPool*) 0x80560000)
+
+static Gfx* gDebugPoolHead;
+static u8* gDebugPoolAllocTail;
+static int gDebugPoolWhenToReset = -1;
+static int gDebugPoolLastType = -1; 
+extern struct GfxPool gGfxPools[2];
+
+static void debug_pool_init()
+{
+    int idx = gGfxPool == &gGfxPools[0] ? 0 : 1;
+    gDebugPoolHead = (Gfx*) &gDebugPools[idx];
+    if (gDebugPoolLastType != idx)
+    {
+        int reset = 0;
+        if (gDebugPoolLastType == -1)
+        {
+            reset = 1;
+            gDebugPoolWhenToReset = idx;
+        }
+        else
+        {
+            if (gDebugPoolWhenToReset == idx)
+            {
+                reset = 1;
+            }
+        }
+
+        gDebugPoolLastType = idx;
+        if (reset)
+        {
+            gDebugPoolAllocTail = (u8*) 0x80560000;
+        }
+    }
+}
+
+static void* debug_pool_alloc(u32 size)
+{
+    void *ptr = NULL;
+
+    size = ALIGN8(size);
+    gDebugPoolAllocTail -= size;
+    ptr = gDebugPoolAllocTail;
+    return ptr;
+}
+
+/**
+ * The max amount of debug boxes before debug_box() just returns.
+ * You can set this to something higher, but you might run out of space in the gfx pool.
+ */
+#define MAX_DEBUG_BOXES 512
+
+enum DebugBoxFlags {
+    DEBUG_SHAPE_BOX      = (1 << 0), // 0x01
+    DEBUG_SHAPE_CYLINDER = (1 << 1), // 0x02
+    DEBUG_UCODE_DEFAULT  = (1 << 2), // 0x04
+#ifdef OBJECTS_REJ
+    DEBUG_UCODE_REJ      = (1 << 3), // 0x08
+#else
+    DEBUG_UCODE_REJ      = DEBUG_UCODE_DEFAULT,
+#endif
+    DEBUG_BOX_CLEAR      = (1 << 4), // 0x10
+};
+
+f32 gScaleFactor = 4.f;
+
+extern s16 *gEnvironmentRegions;
+#define NUM_CELLS                   (2 * LEVEL_BOUNDARY_MAX / CELL_SIZE)
+#define CELL_SIZE          0x400   //  1024, NUM_CELLS = 16
+#define GET_CELL_COORD(p)   ((((s32)(p / gScaleFactor) + LEVEL_BOUNDARY_MAX) / CELL_SIZE) & (NUM_CELLS - 1));
+
+#define is_outside_level_bounds(xPos, zPos) \
+    (((xPos / gScaleFactor) <= -LEVEL_BOUNDARY_MAX) ||     \
+     ((xPos / gScaleFactor) >=  LEVEL_BOUNDARY_MAX) ||     \
+     ((zPos / gScaleFactor) <= -LEVEL_BOUNDARY_MAX) ||     \
+     ((zPos / gScaleFactor) >=  LEVEL_BOUNDARY_MAX))
+
+#define SURFACE_IS_INSTANT_WARP(cmd)            (((cmd) >= SURFACE_INSTANT_WARP_1B) && ((cmd) < SURFACE_INSTANT_WARP_1B + INSTANT_WARP_INDEX_STOP))
+
+#define TC_B_OFF	-0.5
+#define TC_B(p)		(((p) + TC_B_OFF) * 32)
+#define ST_B(s, t)	{TC_B(s), TC_B(t)}
 
 Vtx debug_box_mesh[32] = {
 	{{{    0,    0, -100}, 0, ST_B( 0, 32), {0x00, 0x00, 0x00, 0xFF}}},
@@ -102,6 +195,9 @@ Gfx dl_debug_cylinder_verts[] = {
 	gsSPEndDisplayList(),
 };
 
+static u8 hitboxView  = FALSE;
+static u8 surfaceView = FALSE;
+
 /**
  * Internal struct containing box info
  */
@@ -118,8 +214,8 @@ struct DebugVert {
     Vec3f normal;
 };
 
-struct DebugBox sBoxes[MAX_DEBUG_BOXES];
-s16 sNumBoxes = 0;
+static struct DebugBox sBoxes[MAX_DEBUG_BOXES];
+static s16 sNumBoxes = 0;
 
 extern Mat4 gMatStack[32]; // XXX: Hack
 
@@ -175,12 +271,28 @@ static const Gfx dl_debug_box_end[] = {
     gsSPEndDisplayList(),
 };
 
-s16 gVisualSurfaceCount;
-s32 gVisualOffset;
+static u8 viewCycle = 0;
+
+// Puppyprint will call this from elsewhere.
+static void debug_box_input(void) {
+    if (gPlayer1Controller->buttonPressed & R_JPAD) {
+        viewCycle++;
+        if (viewCycle > 3) {
+            viewCycle = 0;
+        }
+        hitboxView = viewCycle == 1 || viewCycle == 3;
+        surfaceView = viewCycle == 2 || viewCycle == 3;
+    }
+}
+
+static s16 gVisualSurfaceCount;
+static s32 gVisualOffset;
 extern s32 gSurfaceNodesAllocated;
 extern s32 gSurfacesAllocated;
 
-void iterate_surfaces_visual(s32 x, s32 z, Vtx *verts) {
+#define NUM_SPATIAL_PARTITIONS 3
+
+static void iterate_surfaces_visual(s32 x, s32 z, Vtx *verts) {
     struct SurfaceNode *node;
     struct Surface *surf;
     s32 i = 0;
@@ -199,8 +311,6 @@ void iterate_surfaces_visual(s32 x, s32 z, Vtx *verts) {
             case 3: node =  gStaticSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_FLOORS].next; colorRGB_copy(col, (ColorRGB)COLOR_RGB_BLUE  ); break;
             case 4: node = gDynamicSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_CEILS ].next; colorRGB_copy(col, (ColorRGB)COLOR_RGB_RED   ); break;
             case 5: node =  gStaticSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_CEILS ].next; colorRGB_copy(col, (ColorRGB)COLOR_RGB_RED   ); break;
-            case 6: node = gDynamicSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_WATER ].next; colorRGB_copy(col, (ColorRGB)COLOR_RGB_YELLOW); break;
-            case 7: node =  gStaticSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_WATER ].next; colorRGB_copy(col, (ColorRGB)COLOR_RGB_YELLOW); break;
         }
 
         while (node != NULL) {
@@ -208,13 +318,13 @@ void iterate_surfaces_visual(s32 x, s32 z, Vtx *verts) {
             node = node->next;
 
             if (SURFACE_IS_INSTANT_WARP(surf->type)) {
-                make_vertex(verts, (gVisualSurfaceCount + 0), surf->vertex1[0], surf->vertex1[1], surf->vertex1[2], 0, 0, 0xFF, 0xA0, 0x00, 0x80);
-                make_vertex(verts, (gVisualSurfaceCount + 1), surf->vertex2[0], surf->vertex2[1], surf->vertex2[2], 0, 0, 0xFF, 0xA0, 0x00, 0x80);
-                make_vertex(verts, (gVisualSurfaceCount + 2), surf->vertex3[0], surf->vertex3[1], surf->vertex3[2], 0, 0, 0xFF, 0xA0, 0x00, 0x80);
+                make_vertex(verts, (gVisualSurfaceCount + 0), surf->vertex1[0] * gScaleFactor, surf->vertex1[1] * gScaleFactor, surf->vertex1[2] * gScaleFactor, 0, 0, 0xFF, 0xA0, 0x00, 0x80);
+                make_vertex(verts, (gVisualSurfaceCount + 1), surf->vertex2[0] * gScaleFactor, surf->vertex2[1] * gScaleFactor, surf->vertex2[2] * gScaleFactor, 0, 0, 0xFF, 0xA0, 0x00, 0x80);
+                make_vertex(verts, (gVisualSurfaceCount + 2), surf->vertex3[0] * gScaleFactor, surf->vertex3[1] * gScaleFactor, surf->vertex3[2] * gScaleFactor, 0, 0, 0xFF, 0xA0, 0x00, 0x80);
             } else {
-                make_vertex(verts, (gVisualSurfaceCount + 0), surf->vertex1[0], surf->vertex1[1], surf->vertex1[2], 0, 0, col[0], col[1], col[2], 0x80);
-                make_vertex(verts, (gVisualSurfaceCount + 1), surf->vertex2[0], surf->vertex2[1], surf->vertex2[2], 0, 0, col[0], col[1], col[2], 0x80);
-                make_vertex(verts, (gVisualSurfaceCount + 2), surf->vertex3[0], surf->vertex3[1], surf->vertex3[2], 0, 0, col[0], col[1], col[2], 0x80);
+                make_vertex(verts, (gVisualSurfaceCount + 0), surf->vertex1[0] * gScaleFactor, surf->vertex1[1] * gScaleFactor, surf->vertex1[2] * gScaleFactor, 0, 0, col[0], col[1], col[2], 0x80);
+                make_vertex(verts, (gVisualSurfaceCount + 1), surf->vertex2[0] * gScaleFactor, surf->vertex2[1] * gScaleFactor, surf->vertex2[2] * gScaleFactor, 0, 0, col[0], col[1], col[2], 0x80);
+                make_vertex(verts, (gVisualSurfaceCount + 2), surf->vertex3[0] * gScaleFactor, surf->vertex3[1] * gScaleFactor, surf->vertex3[2] * gScaleFactor, 0, 0, col[0], col[1], col[2], 0x80);
             }
 
             gVisualSurfaceCount += 3;
@@ -222,7 +332,9 @@ void iterate_surfaces_visual(s32 x, s32 z, Vtx *verts) {
     }
 }
 
-void iterate_surfaces_envbox(Vtx *verts) {
+typedef Collision TerrainData;
+
+static void iterate_surfaces_envbox(Vtx *verts) {
     TerrainData *p = gEnvironmentRegions;
     ColorRGB col = COLOR_RGB_YELLOW;
     s32 i = 0;
@@ -254,7 +366,7 @@ void iterate_surfaces_envbox(Vtx *verts) {
 #define VERTCOUNT 12
 #endif // OBJECTS_REJ
 
-void visual_surface_display(Vtx *verts, s32 iteration) {
+static void visual_surface_display(Vtx *verts, s32 iteration) {
     s32 vts = (iteration ? gVisualOffset : gVisualSurfaceCount);
     s32 vtl = 0;
     s32 count = VERTCOUNT;
@@ -263,13 +375,13 @@ void visual_surface_display(Vtx *verts, s32 iteration) {
     while (vts > 0) {
         if (count == VERTCOUNT) {
             ntx = MIN(VERTCOUNT, vts);
-            gSPVertex(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(verts + (gVisualSurfaceCount - vts)), ntx, 0);
+            gSPVertex(gDebugPoolHead++, VIRTUAL_TO_PHYSICAL(verts + (gVisualSurfaceCount - vts)), ntx, 0);
             count = 0;
             vtl   = VERTCOUNT;
         }
 
         if (vtl >= 6) {
-            gSP2Triangles(gDisplayListHead++, (count + 0),
+            gSP2Triangles(gDebugPoolHead++, (count + 0),
                                               (count + 1),
                                               (count + 2), 0x0,
                                               (count + 3),
@@ -279,7 +391,7 @@ void visual_surface_display(Vtx *verts, s32 iteration) {
             vtl   -= 6;
             count += 6;
         } else if (vtl >= 3) {
-            gSP1Triangle(gDisplayListHead++, (count + 0),
+            gSP1Triangle(gDebugPoolHead++, (count + 0),
                                              (count + 1),
                                              (count + 2), 0x0);
             vts   -= 3;
@@ -289,7 +401,7 @@ void visual_surface_display(Vtx *verts, s32 iteration) {
     }
 }
 
-s32 iterate_surface_count(s32 x, s32 z) {
+static s32 iterate_surface_count(s32 x, s32 z) {
     struct SurfaceNode *node;
     s32 i = 0;
     s32 j = 0;
@@ -309,8 +421,6 @@ s32 iterate_surface_count(s32 x, s32 z) {
             case 3: node =  gStaticSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_FLOORS].next; break;
             case 4: node = gDynamicSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_CEILS ].next; break;
             case 5: node =  gStaticSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_CEILS ].next; break;
-            case 6: node = gDynamicSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_WATER ].next; break;
-            case 7: node =  gStaticSurfacePartition[cellZ][cellX][SPATIAL_PARTITION_WATER ].next; break;
         }
 
         while (node != NULL) {
@@ -326,14 +436,14 @@ s32 iterate_surface_count(s32 x, s32 z) {
     return j;
 }
 
-void visual_surface_loop(void) {
+static void visual_surface_loop(void) {
     if (!gSurfaceNodesAllocated
      || !gSurfacesAllocated
      || !gMarioState->marioObj) {
         return;
     }
-    Mtx *mtx   = alloc_display_list(sizeof(Mtx));
-    Vtx *verts = alloc_display_list((iterate_surface_count(gMarioState->pos[0], gMarioState->pos[2]) * 3) * sizeof(Vtx));
+    Mtx *mtx   = debug_pool_alloc(sizeof(Mtx));
+    Vtx *verts = debug_pool_alloc((iterate_surface_count(gMarioState->pos[0], gMarioState->pos[2]) * 3) * sizeof(Vtx));
 
     gVisualSurfaceCount = 0;
     gVisualOffset       = 0;
@@ -343,9 +453,9 @@ void visual_surface_loop(void) {
     }
     mtxf_to_mtx(mtx, gMatStack[1]);
 
-    gSPDisplayList(gDisplayListHead++, dl_visual_surface);
+    gSPDisplayList(gDebugPoolHead++, VIRTUAL_TO_PHYSICAL(dl_visual_surface));
 
-    gSPMatrix(gDisplayListHead++, mtx, (G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH));
+    gSPMatrix(gDebugPoolHead++, mtx, (G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH));
 
     iterate_surfaces_visual(gMarioState->pos[0], gMarioState->pos[2], verts);
 
@@ -353,12 +463,12 @@ void visual_surface_loop(void) {
 
     iterate_surfaces_envbox(verts);
 
-    gDPSetRenderMode(gDisplayListHead++, G_RM_ZB_XLU_SURF, G_RM_NOOP2);
+    gDPSetRenderMode(gDebugPoolHead++, G_RM_ZB_XLU_SURF, G_RM_NOOP2);
 
     visual_surface_display(verts, 1);
 
-    gSPPopMatrix(gDisplayListHead++, G_MTX_MODELVIEW);
-    gSPDisplayList(gDisplayListHead++, dl_debug_box_end);
+    gSPPopMatrix(gDebugPoolHead++, G_MTX_MODELVIEW);
+    gSPDisplayList(gDebugPoolHead++, VIRTUAL_TO_PHYSICAL(dl_debug_box_end));
 }
 
 /**
@@ -389,7 +499,7 @@ static void append_debug_box(Vec3f center, Vec3f bounds, s16 yaw, s32 type) {
  * If the alpha component is zero, DBG_BOX_ALPHA (0x7f) will be used instead.
  * Ex: 0xFF0000 becomes 0x7FFF0000
  */
-void debug_box_color(u32 color) {
+static void debug_box_color(u32 color) {
     if ((color >> 24) == 0) color |= (DBG_BOX_ALPHA << 24);
     sCurBoxColor = color;
 }
@@ -400,31 +510,21 @@ void debug_box_color(u32 color) {
  *
  * @see debug_box_rot()
  */
-void debug_box(Vec3f center, Vec3f bounds, s32 type) {
+static void debug_box(Vec3f center, Vec3f bounds, s32 type) {
     append_debug_box(center, bounds, 0, type);
 }
 
 /**
  * Draws a debug box from (center - bounds) to (center + bounds), rotating it by `yaw`
  */
-void debug_box_rot(Vec3f center, Vec3f bounds, s16 yaw, s32 type) {
+static void debug_box_rot(Vec3f center, Vec3f bounds, s16 yaw, s32 type) {
     append_debug_box(center, bounds, yaw, type);
-}
-
-/**
- * Draws a debug box from pMin to pMax
- * To draw a rotated box this way, use debug_box_pos_rot()
- *
- * @see debug_box_pos_rot()
- */
-void debug_box_pos(Vec3f pMin, Vec3f pMax, s32 type) {
-    debug_box_pos_rot(pMin, pMax, 0x0, type);
 }
 
 /**
  * Draws a debug box from pMin to pMax, rotating it in the xz-plane by `yaw`
  */
-void debug_box_pos_rot(Vec3f pMin, Vec3f pMax, s16 yaw, s32 type) {
+static void debug_box_pos_rot(Vec3f pMin, Vec3f pMax, s16 yaw, s32 type) {
     Vec3f center, bounds;
 
     bounds[0] = ((pMax[0] - pMin[0]) / 2.0f);
@@ -436,15 +536,25 @@ void debug_box_pos_rot(Vec3f pMin, Vec3f pMax, s16 yaw, s32 type) {
     append_debug_box(center, bounds, yaw, type);
 }
 
+/**
+ * Draws a debug box from pMin to pMax
+ * To draw a rotated box this way, use debug_box_pos_rot()
+ *
+ * @see debug_box_pos_rot()
+ */
+static void debug_box_pos(Vec3f pMin, Vec3f pMax, s32 type) {
+    debug_box_pos_rot(pMin, pMax, 0x0, type);
+}
+
 static void render_box(int index) {
     struct DebugBox *box = &sBoxes[index];
     s32 color = box->color;
 
     // Translate to the origin, rotate, then translate back, effectively rotating the box about its center
-    Mtx *mtx       = alloc_display_list(sizeof(Mtx));
-    Mtx *translate = alloc_display_list(sizeof(Mtx));
-    Mtx *rotate    = alloc_display_list(sizeof(Mtx));
-    Mtx *scale     = alloc_display_list(sizeof(Mtx));
+    Mtx *mtx       = debug_pool_alloc(sizeof(Mtx));
+    Mtx *translate = debug_pool_alloc(sizeof(Mtx));
+    Mtx *rotate    = debug_pool_alloc(sizeof(Mtx));
+    Mtx *scale     = debug_pool_alloc(sizeof(Mtx));
 
     if ((mtx       == NULL)
      || (translate == NULL)
@@ -458,27 +568,27 @@ static void render_box(int index) {
                    ((f32) box->bounds[1] * 0.01f),
                    ((f32) box->bounds[2] * 0.01f));
 
-    gSPMatrix(gDisplayListHead++, mtx,       (G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH));
-    gSPMatrix(gDisplayListHead++, translate, (G_MTX_MODELVIEW | G_MTX_MUL  | G_MTX_NOPUSH));
-    gSPMatrix(gDisplayListHead++, rotate,    (G_MTX_MODELVIEW | G_MTX_MUL  | G_MTX_NOPUSH));
-    gSPMatrix(gDisplayListHead++, scale,     (G_MTX_MODELVIEW | G_MTX_MUL  | G_MTX_NOPUSH));
+    gSPMatrix(gDebugPoolHead++, mtx,       (G_MTX_MODELVIEW | G_MTX_LOAD | G_MTX_NOPUSH));
+    gSPMatrix(gDebugPoolHead++, translate, (G_MTX_MODELVIEW | G_MTX_MUL  | G_MTX_NOPUSH));
+    gSPMatrix(gDebugPoolHead++, rotate,    (G_MTX_MODELVIEW | G_MTX_MUL  | G_MTX_NOPUSH));
+    gSPMatrix(gDebugPoolHead++, scale,     (G_MTX_MODELVIEW | G_MTX_MUL  | G_MTX_NOPUSH));
 
-    gDPSetEnvColor(gDisplayListHead++, ((color >> 16) & 0xFF),
+    gDPSetEnvColor(gDebugPoolHead++, ((color >> 16) & 0xFF),
                                        ((color >>  8) & 0xFF),
                                        ((color      ) & 0xFF),
                                        ((color >> 24) & 0xFF));
 
     if (box->type & DEBUG_SHAPE_BOX) {
-        gSPDisplayList(gDisplayListHead++, dl_debug_box_verts);
+        gSPDisplayList(gDebugPoolHead++, VIRTUAL_TO_PHYSICAL(dl_debug_box_verts));
     }
     if (box->type & DEBUG_SHAPE_CYLINDER) {
-        gSPDisplayList(gDisplayListHead++, dl_debug_cylinder_verts);
+        gSPDisplayList(gDebugPoolHead++, VIRTUAL_TO_PHYSICAL(dl_debug_cylinder_verts));
     }
 
-    gSPPopMatrix(gDisplayListHead++, G_MTX_MODELVIEW);
+    gSPPopMatrix(gDebugPoolHead++, G_MTX_MODELVIEW);
 }
 
-void render_debug_boxes(s32 type) {
+static void render_debug_boxes(s32 type) {
     s32 i;
 
     debug_box_color(DBG_BOX_DEF_COLOR);
@@ -486,7 +596,7 @@ void render_debug_boxes(s32 type) {
     if (sNumBoxes == 0) return;
     if (gAreaUpdateCounter < 3) return;
 
-    gSPDisplayList(gDisplayListHead++, dl_debug_box_begin);
+    gSPDisplayList(gDebugPoolHead++, VIRTUAL_TO_PHYSICAL(dl_debug_box_begin));
 
     for (i = 0; i < sNumBoxes; ++i) {
         if ((type & DEBUG_UCODE_DEFAULT) && (sBoxes[i].type & DEBUG_UCODE_DEFAULT)) render_box(i);
@@ -496,7 +606,49 @@ void render_debug_boxes(s32 type) {
     if (type & DEBUG_BOX_CLEAR) {
         sNumBoxes = 0;
     }
-    gSPDisplayList(gDisplayListHead++, dl_debug_box_end);
+    gSPDisplayList(gDebugPoolHead++, VIRTUAL_TO_PHYSICAL(dl_debug_box_end));
 }
 
+void DebugBox_renderHook()
+{
+    debug_pool_init();
+    if (Hacktice_gConfig.showCollision)
+    {
+        gSPDisplayList(gDisplayListHead++, VIRTUAL_TO_PHYSICAL(gDebugPoolHead));
+
+        visual_surface_loop();
+        render_debug_boxes(DEBUG_UCODE_DEFAULT | DEBUG_BOX_CLEAR);
+
+        gSPEndDisplayList(gDebugPoolHead);
+    }
+}
+
+void DebugBox_hitboxHook(struct Object *node)
+{
+    Vec3f bnds1, bnds2;
+    // This will create a cylinder that visualises their hitbox.
+    // If they do not have a hitbox, it will be a small white cube instead.
+    if (node->oIntangibleTimer != -1) {
+        vec3f_set(bnds1, node->oPosX, (node->oPosY - node->hitboxDownOffset), node->oPosZ);
+        vec3f_set(bnds2, node->hitboxRadius, node->hitboxHeight-node->hitboxDownOffset, node->hitboxRadius);
+        if (node->behavior == segmented_to_virtual((const BehaviorScript*) 0x13000780)
+            || node->behavior == segmented_to_virtual((const BehaviorScript*) 0x13000afc)
+            || node->behavior == segmented_to_virtual((const BehaviorScript*) 0x1300075c)) {
+            debug_box_color(COLOR_RGBA32_DEBUG_WARP);
+        } else {
+            debug_box_color(COLOR_RGBA32_DEBUG_HITBOX);
+        }
+
+        debug_box(bnds1, bnds2, (DEBUG_SHAPE_CYLINDER | DEBUG_UCODE_REJ));
+        vec3f_set(bnds1, node->oPosX, (node->oPosY - node->hitboxDownOffset), node->oPosZ);
+        vec3f_set(bnds2, node->hurtboxRadius, node->hurtboxHeight, node->hurtboxRadius);
+        debug_box_color(COLOR_RGBA32_DEBUG_HURTBOX);
+        debug_box(bnds1, bnds2, (DEBUG_SHAPE_CYLINDER | DEBUG_UCODE_REJ));
+    } else {
+        vec3f_set(bnds1, node->oPosX, (node->oPosY - 15), node->oPosZ);
+        vec3f_set(bnds2, 30, 30, 30);
+        debug_box_color(COLOR_RGBA32_DEBUG_POSITION);
+        debug_box(bnds1, bnds2, (DEBUG_SHAPE_BOX | DEBUG_UCODE_REJ));
+    }
+}
 #endif
