@@ -26,6 +26,8 @@
 #include "config.h"
 #include "randomizer.h"
 
+#include "hacktice/death_floor.h"
+
 u8  sDelayInvincTimer;
 s16 sInvulnerable;
 u32 interact_coin          (struct MarioState *m, u32 interactType, struct Object *obj);
@@ -1867,9 +1869,7 @@ void mario_process_interactions(struct MarioState *m) {
 
 void check_death_barrier(struct MarioState *m) {
     if (m->pos[1] < m->floorHeight + 2048.0f) {
-        if (level_trigger_warp(m, WARP_OP_WARP_FLOOR) == 20 && !(m->flags & MARIO_FALL_SOUND_PLAYED)) {
-            play_sound(SOUND_MARIO_WAAAOOOW, m->marioObj->header.gfx.cameraToObject);
-        }
+        DeathFloor_checkDeathBarrierHook(m);
     }
 }
 

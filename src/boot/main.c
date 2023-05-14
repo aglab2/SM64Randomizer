@@ -22,6 +22,8 @@
 #include "game/profiling.h"
 #include "game/vc_check.h"
 
+#include "hacktice/savestate.h"
+
 // Message IDs
 enum MessageIDs {
     MESG_SP_COMPLETE = 100,
@@ -313,6 +315,8 @@ void thread3_main(UNUSED void *arg) {
 #ifdef UNF
     debug_initialize();
 #endif
+
+    SaveState_Init();
 
 #ifdef DEBUG
     osSyncPrintf("Super Mario 64\n");
