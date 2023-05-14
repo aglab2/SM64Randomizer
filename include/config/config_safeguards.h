@@ -42,7 +42,7 @@
     #undef VANILLA_STYLE_CUSTOM_DEBUG
     #undef PUPPYPRINT_DEBUG
     #undef PUPPYPRINT_DEBUG_CYCLES
-    #undef VISUAL_DEBUG
+    // #undef VISUAL_DEBUG
     #undef UNLOCK_ALL
     #undef COMPLETE_SAVE_FILE
     #undef DEBUG_FORCE_CRASH_ON_BOOT

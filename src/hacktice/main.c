@@ -8,6 +8,7 @@
 #include "custom_text.h"
 #include "death.h"
 #include "death_floor.h"
+#include "debug_box.h"
 #include "distance.h"
 #include "input_viewer.h"
 #include "interaction.h"
@@ -29,8 +30,6 @@
 
 void Hacktice_onFrame()
 {
-    // SoftReset_onFrame();
-
     HackticeSetStatus(HACKTICE_STATUS_ACTIVE);
     if (PLAY_MODE_NORMAL == sCurrPlayMode)
     {
@@ -79,12 +78,19 @@ uintptr_t Hacktice_start[] = {
     (uintptr_t) LevelReset_onSpawnObjectsFromInfoHook,
 #ifdef BINARY
     (uintptr_t) LevelReset_setObjectRespawnInfoBits,
+    (uintptr_t) &DebugBox_hitboxHook,   
+    (uintptr_t) &DebugBox_renderHook,
 #else
     (uintptr_t) 0 /*ignored*/,
+    (uintptr_t) 0 /*ignored*/,
+    (uintptr_t) 0 /*ignored*/,
 #endif
-    (uintptr_t) 0 /*reserved for future use*/,
+ 
+    (uintptr_t) 0 /*reserved*/,
+    (uintptr_t) 0 /*reserved*/,
+    (uintptr_t) 0 /*reserved*/,
 };
 
 #ifndef BINARY
-bool Hacktice_gEnabled = 1;
+bool Hacktice_gEnabled = true;
 #endif
